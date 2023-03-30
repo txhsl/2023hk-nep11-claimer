@@ -27,11 +27,11 @@ namespace HK2023NFT
             var token = (TokenState)StdLib.Deserialize(tokenMap[tokenId]);
             var map = new Map<string, object>();
             map["name"] = token.Name;
-            map["uri"] = token.Uri;
+            map["img"] = token.Img;
             return map;
         }
 
-        public static void MintToken(UInt160 to, string uri)
+        public static void MintToken(UInt160 to, string img)
         {
             ExecutionEngine.Assert(Runtime.CheckWitness(Admin));
             var id = NewTokenId();
@@ -39,7 +39,7 @@ namespace HK2023NFT
             {
                 Owner = to,
                 Name = id,
-                Uri = uri
+                Img = img
             };
             Mint(id, token);
         }
