@@ -4,6 +4,6 @@ namespace HK2023NFT
 {
     public class TokenState: Nep11TokenState
     {
-        public string Img;
+        public string Image;
     }
 }

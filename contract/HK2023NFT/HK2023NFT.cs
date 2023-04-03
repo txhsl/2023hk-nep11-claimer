@@ -5,6 +5,7 @@ using Neo.SmartContract.Framework.Attributes;
 using Neo.SmartContract.Framework.Native;
 using Neo.SmartContract.Framework.Services;
 using System.ComponentModel;
+using System.Numerics;
 
 namespace HK2023NFT
 {
@@ -27,19 +28,27 @@ namespace HK2023NFT
             var token = (TokenState)StdLib.Deserialize(tokenMap[tokenId]);
             var map = new Map<string, object>();
             map["name"] = token.Name;
-            map["img"] = token.Img;
+            map["image"] = token.Image;
             return map;
         }
 
-        public static void MintToken(UInt160 to, string img)
+        [Safe]
+        public static BigInteger Count()
+        {
+            var prefix = new byte[] { Prefix_TokenId };
+            var id = Storage.Get(Storage.CurrentReadOnlyContext, prefix);
+            return (BigInteger)id;
+        }
+
+        public static void MintToken(UInt160 to, string image)
         {
             ExecutionEngine.Assert(Runtime.CheckWitness(Admin));
             var id = NewTokenId();
             var token = new TokenState()
             {
                 Owner = to,
-                Name = id,
-                Img = img
+                Name = "HK2023 #" + Count().ToString(),
+                Image = image
             };
             Mint(id, token);
         }
