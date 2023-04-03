@@ -20,7 +20,7 @@ const db = mysql.createPool({
     user: 'root',
     password: 'root',
     database: 'claimer'
-})
+});
 
 // Servers
 // const options = {
@@ -50,15 +50,11 @@ app.use((req, res, next) => {
     } else {
         next();
     }
-})
-// Error handling
-app.use((error, req, res, next) => {
-    res.status(500).json({ 'result': false, 'error': error });
 });
 
 app.listen(8080, () => {
     console.log('Http server running at http://127.0.0.1:8080');
-})
+});
 // https.createServer(options, app).listen(8443, () => {
 //     console.log('Https server running at https://127.0.0.1:8443');
 // });
@@ -66,9 +62,10 @@ app.listen(8080, () => {
 // Routes
 app.get('/', (_req, res) => {
     res.send('Claimer is working');
-})
+});
 
 // User management
+// Create a new user and a related new wallet
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
     const salt = genSalt();
@@ -90,7 +87,7 @@ app.post('/register', async (req, res) => {
             fs.rmSync('./'+account.address+'.json');
             res.status(500).json({ 'result': false, 'error': err });
         }
-        const sql = `INSERT INTO users (username, password, salt, account) VALUES ('${username}', '${passwordData}', '${salt}', '${account.address}')`;
+        const sql = `INSERT INTO users (username, password, salt, account, claimed, injected) VALUES ('${username}', '${passwordData}', '${salt}', '${account.address}', false, false)`;
         conn.query(sql, (err, _) => {
             if (err) {
                 res.status(500).json({ 'result': false, 'error': err });
@@ -105,10 +102,11 @@ app.post('/register', async (req, res) => {
     });
 });
 
+// Login and create a session
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
 
-    const sql = `SELECT * FROM users WHERE username='${username}'`;
+    const sql = `SELECT * FROM users WHERE username = '${username}'`;
     db.getConnection((err, conn) => {
         if (err) {
             res.status(500).json({ 'result': false, 'error': err });
@@ -135,20 +133,75 @@ app.post('/login', (req, res) => {
     });
 });
 
-app.post('/claim', async (req, res) => {
-    const address = req.session.account;
+// Request some gas from the faucet
+app.post('/faucet', async (req, res) => {
+    const username = req.session.username;
+    const claimer = req.session.account;
 
     const data = fs.readFileSync('./dispatcher.json', {encoding:'utf8', flag:'r'});
     const dispatcherWallet = new wallet.Wallet(JSON.parse(data));
-    const account = await dispatcherWallet.accounts[0].decrypt('');
+    const dispatcher = await dispatcherWallet.accounts[0].decrypt('');
 
-    // Mint NFT from dispatcher to claimer address
+    // Transfer some GAS from dispatcher to claimer address
     const signer = {
-        account: account.scriptHash,
+        account: dispatcher.scriptHash,
         scopes: tx.WitnessScope.CalledByEntry
     }
     var sb = new sc.ScriptBuilder();
-    sb.emitAppCall(contract, "mintToken", [sc.ContractParam.hash160(address), sc.ContractParam.string("hello")]);
+    sb.emitAppCall(CONST.NATIVE_CONTRACT_HASH.GasToken, "transfer", [sc.ContractParam.hash160(dispatcher.address), sc.ContractParam.hash160(claimer), sc.ContractParam.integer(5000000), sc.ContractParam.any()]);
+    const script = sb.str;
+
+    var faucetTx = new tx.Transaction({script});
+    faucetTx.validUntilBlock = await client.getBlockCount() + 1;
+    faucetTx.addSigner(signer);
+    faucetTx.systemFee = await checkSystemFee(script, signer);
+    faucetTx.networkFee = await checkNetworkFee(faucetTx);
+    const signedTx = faucetTx.sign(dispatcher, magic);
+
+    // Record as claimed
+    db.getConnection((err, conn) => {
+        if (err) {
+            res.status(500).json({ 'result': false, 'error': err });
+        }
+        const qsql = `SELECT * FROM users WHERE username = '${username}'`;
+        conn.query(qsql, async (err, result) => {
+            if (err) {
+                res.status(500).json({ 'result': false, 'error': err });
+            } else if (result[0].injected > 0) {
+                res.status(500).json({ 'result': false, 'error': 'Has injected already' });
+            }
+            else {
+                const cRes = await client.sendRawTransaction(signedTx);
+                const usql = `UPDATE users SET injected = true WHERE username = '${username}'`;
+                conn.query(usql, (err, _) => {
+                    if (err) {
+                        res.status(500).json({ 'result': false, 'error': err });
+                    } else {
+                        res.json({ 'result': true, 'tx_id': cRes });
+                    }
+                });
+            }
+        });
+        conn.release();
+    });
+});
+
+// Claim NFT to the user's wallet
+app.post('/claim', async (req, res) => {
+    const username = req.session.username;
+    const claimer = req.session.account;
+
+    const data = fs.readFileSync('./dispatcher.json', {encoding:'utf8', flag:'r'});
+    const dispatcherWallet = new wallet.Wallet(JSON.parse(data));
+    const dispatcher = await dispatcherWallet.accounts[0].decrypt('');
+
+    // Mint NFT from dispatcher to claimer address
+    const signer = {
+        account: dispatcher.scriptHash,
+        scopes: tx.WitnessScope.CalledByEntry
+    }
+    var sb = new sc.ScriptBuilder();
+    sb.emitAppCall(contract, "mintToken", [sc.ContractParam.hash160(claimer), sc.ContractParam.string("hello")]);
     const script = sb.str;
 
     var mintTx = new tx.Transaction({script});
@@ -156,18 +209,43 @@ app.post('/claim', async (req, res) => {
     mintTx.addSigner(signer);
     mintTx.systemFee = await checkSystemFee(script, signer);
     mintTx.networkFee = await checkNetworkFee(mintTx);
-    const signedTx = mintTx.sign(account, magic);
+    const signedTx = mintTx.sign(dispatcher, magic);
 
-    const cRes = await client.sendRawTransaction(signedTx);
-    res.json({ 'result': true, 'tx_id': cRes });
+    // Record as claimed
+    db.getConnection((err, conn) => {
+        if (err) {
+            res.status(500).json({ 'result': false, 'error': err });
+        }
+        const qsql = `SELECT * FROM users WHERE username = '${username}'`;
+        conn.query(qsql, async (err, result) => {
+            if (err) {
+                res.status(500).json({ 'result': false, 'error': err });
+            } else if (result[0].claimed > 0) {
+                res.status(500).json({ 'result': false, 'error': 'Has claimed already' });
+            }
+            else {
+                const cRes = await client.sendRawTransaction(signedTx);
+                const usql = `UPDATE users SET claimed = true WHERE username = '${username}'`;
+                conn.query(usql, (err, _) => {
+                    if (err) {
+                        res.status(500).json({ 'result': false, 'error': err });
+                    } else {
+                        res.json({ 'result': true, 'tx_id': cRes });
+                    }
+                });
+            }
+        });
+        conn.release();
+    });
 });
 
+// Get the claimed NFTs of the user
 app.post('/balance', async (req, res) => {
-    const address = req.session.account;
+    const claimer = req.session.account;
 
     // Query nfts of claimer
     var sb = new sc.ScriptBuilder();
-    sb.emitAppCall(contract, "tokensOf", [sc.ContractParam.hash160(address)]);
+    sb.emitAppCall(contract, "tokensOf", [sc.ContractParam.hash160(claimer)]);
     const response = await client.invokeScript(u.HexString.fromHex(sb.str));
     const iterator = response.stack[0].id;
     const session = response.session;
@@ -182,6 +260,7 @@ app.post('/balance', async (req, res) => {
     res.json({ 'result': true, 'token_ids': iRes});
 });
 
+// Transfer the NFT to another address
 app.post('/transfer', async (req, res) => {
     const from = req.session.account;
     const to = req.body.address;
@@ -189,15 +268,15 @@ app.post('/transfer', async (req, res) => {
 
     const data = fs.readFileSync('./'+from+'.json', {encoding:'utf8', flag:'r'});
     const claimerWallet = new wallet.Wallet(JSON.parse(data));
-    const account = await claimerWallet.accounts[0].decrypt('');
+    const claimer = await claimerWallet.accounts[0].decrypt('');
 
     // Transfer nfts from claimer address to user address
     const signer = {
-        account: account.scriptHash,
+        account: claimer.scriptHash,
         scopes: tx.WitnessScope.CalledByEntry
     }
     var sb = new sc.ScriptBuilder();
-    sb.emitAppCall(contract, "transfer", [sc.ContractParam.hash160(to), sc.ContractParam.byteArray(id), sc.ContractParam.byteArray("")]);
+    sb.emitAppCall(contract, "transfer", [sc.ContractParam.hash160(to), sc.ContractParam.byteArray(id), sc.ContractParam.any()]);
     const script = sb.str;
 
     var mintTx = new tx.Transaction({script});
@@ -205,7 +284,7 @@ app.post('/transfer', async (req, res) => {
     mintTx.addSigner(signer);
     mintTx.systemFee = await checkSystemFee(script, signer);
     mintTx.networkFee = await checkNetworkFee(mintTx);
-    const signedTx = mintTx.sign(account, magic);
+    const signedTx = mintTx.sign(claimer, magic);
 
     const tRes = await client.sendRawTransaction(signedTx);
     res.json({ 'result': true, 'tx_id': tRes });
